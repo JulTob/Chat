@@ -9,174 +9,108 @@ with Ada.Exceptions;
 with Chat_Control;
 with Chat_Messages;
 with Lower_Layer_UDP;
+with Handler_Client;
 
 Procedure Chat_Client is
+    package LLU renames Lower_Layer_UDP;
+    package ASU renames Ada.Strings.Unbounded;
+    package T_IO renames Ada.Text_IO;
+    package CM renames Chat_Messages;
+    package ComL renames Ada.Command_Line;
 
-   package CM renames Chat_Messages ;
-   Use type CM.Message_Type;
+    Usage_Error: exception;
 
-   package T_IO renames Ada.Text_IO;
+    -- Variables
+    Server_EP: LLU.End_Point_Type;
+    Client_EP_Receive: LLU.End_Point_Type;
+    Client_EP_Handler: LLU.End_Point_Type;
+    Buffer: aliased LLU.Buffer_Type(1024);
+    Nick: ASU.Unbounded_String;
+    Comentario: ASU.Unbounded_String;
+    Expired: Boolean;
+    Acogido: Boolean;
+    Fin_Mensajes: Boolean := False;
+    Etiqueta: CM.Message_Type;
 
-   package LLU renames Lower_Layer_UDP;
-   Use type LLU.End_Point_Type;
+    -- Helper function to reset and send buffer
+    procedure Send_Buffer(Buffer: in out LLU.Buffer_Type; EP: LLU.End_Point_Type) is
+    begin
+        LLU.Reset(Buffer);
+        LLU.Send(EP, Buffer'Access);
+    end Send_Buffer;
 
-   --Comodity for the use of strings:
-   package ASU renames Ada.Strings.Unbounded;
-   use type ASU.Unbounded_String;
-	 --   subtype UString is Ada.Strings.Unbounded.Unbounded_String; 
-	 		---- Posible UString? hereda todas las propiedades, y se puede usar igual.
+    -- Modular Read Procedure
+    procedure Read_Procedure is
+    begin
+        LLU.Receive(Client_EP_Receive, Buffer'Access, 10.0, Expired);
+        if Expired then
+            T_IO.Put_Line("Timeout or no message received.");
+        else
+            Etiqueta := CM.Message_Type'Input(Buffer'Access);
+            Acogido := Boolean'Input(Buffer'Access);
+            if Acogido then
+                T_IO.Put_Line("Mini-Chat: Welcome " & ASU.To_String(Nick));
+            else
+                T_IO.Put_Line("Nick already used, connection rejected.");
+            end if;
+        end if;
+    end Read_Procedure;
 
-   -- For Control Input
-   package ComL renames Ada.Command_Line;
-   Input_Mismatch: exception;
+    -- Modular Write Procedure
+    procedure Write_Procedure is
+    begin
+        while not Fin_Mensajes loop
+            T_IO.Put(">> ");
+            Comentario := ASU.To_Unbounded_String(T_IO.Get_Line);
+            if ASU.To_String(Comentario) = ".quit" then
+                CM.Message_Type'Output(Buffer'Access, CM.Logout);
+                ASU.Unbounded_String'Output(Buffer'Access, Nick);
+                Send_Buffer(Buffer, Server_EP);
+                Fin_Mensajes := True;
+            else
+                CM.Message_Type'Output(Buffer'Access, CM.Writer);
+                ASU.Unbounded_String'Output(Buffer'Access, Nick);
+                ASU.Unbounded_String'Output(Buffer'Access, Comentario);
+                Send_Buffer(Buffer, Server_EP);
+            end if;
+        end loop;
+    end Write_Procedure;
 
-   -- Uso de funciones y tipos para chat, compartido Cliente y servidor
-   package Chat renames Chat_Control;
+begin
+    -- Input validation
+    if ComL.Argument_Count /= 3 or else ComL.Argument(3) = "server" then
+        raise Usage_Error;
+    else
+        Nick := ASU.To_Unbounded_String(ComL.Argument(3));
+        Server_EP := LLU.Build(LLU.To_IP(ComL.Argument(1)), Integer'Value(ComL.Argument(2)));
+    end if;
 
-   procedure Read (
-	 		Buffer: in out LLU.Buffer_Type;
-			Client: in out Chat.Client_Type
-     ) is
-     	Message_Read: CM.Message_Type;
-      Expired: Boolean;
-      Text: ASU.Unbounded_String;
-   	begin -- Read
-			loop
-				LLU.Reset(Buffer);
-				LLU.Receive (Client.EP, Buffer'Access, 120.0, Expired);
-				if Expired then
-						Ada.Text_IO.Put_Line ("Timeout");
-         else
-	         Message_Read := CM.Message_Type'Input(Buffer'Access);
-         	 Client.Nick := ASU.Unbounded_String'Input (Buffer'Access);
-				 	 Text := ASU.Unbounded_String'Input (Buffer'Access);
-   			 		if Message_Read /= CM.Server then
-							Ada.Text_IO.Put(ASU.To_String(Client.Nick) & ": ");
-							Ada.Text_IO.Put_Line(ASU.To_String(Text));
-				 		else
-							Ada.Text_IO.Put_Line("Message with admin rights.");
-				 			end if;
-						end if;
-         	end loop;
-   	end Read;
+    -- Setup the client endpoint with handler and receiving
+    LLU.Bind_Any(Client_EP_Handler, Handler_Client.Client_Handler'Access);
+    LLU.Bind_Any(Client_EP_Receive);
 
-   procedure Write ( 
-	 			Buffer: in out LLU.Buffer_Type;
-				Client: in out Chat.Client_Type;
-				Server: in out Chat.Server_Type
-			) is
-      Text: ASU.Unbounded_String;
-      Quit: ASU.Unbounded_String := ASU.To_Unbounded_String (".quit");
-      Message: CM.Message_Type := CM.Writer;
-   		begin -- Write
-      	T_IO.Put_Line("You logged in, write to the chat room: ");
-      	T_IO.Put_Line("[Write '.quit' to exit.]");
-      	loop
-					T_IO.Put("Message: ");
-					Text := ASU.To_Unbounded_String(T_IO.Get_Line);
-					if not (Text=Quit) then
-						LLU.Reset(Buffer);
-						CM.Message_Type'Output(Buffer'Access, Message);
-						LLU.End_Point_Type'Output(Buffer'Access, Client.EP);
-						ASU.Unbounded_String'Output (Buffer'Access, Text);
-              -- envía el contenido del Buffer
-						LLU.Send(Server.EP, Buffer'Access);
-						end if;
-					exit when Text = Quit;
-					end loop;
-   			end Write;
+    -- Initialize and send join message to the server
+    CM.Message_Type'Output(Buffer'Access, CM.Init);
+    ASU.Unbounded_String'Output(Buffer'Access, Nick);
+    Send_Buffer(Buffer, Server_EP);
 
-   --Variables y Elementos
-   Server: Chat.Server_Type;
-   Client: Chat.Client_Type;
-   Input_Server_Port:  Integer;
-   Server_IP: ASU.Unbounded_String;
-   Buffer:    aliased LLU.Buffer_Type(1024);
-   Request:   ASU.Unbounded_String;
-   Reply:     ASU.Unbounded_String;
-   Message: CM.Message_Type;
-   Reader: 	constant ASU.Unbounded_String:= ASU.To_Unbounded_String("reader");
-   Aux_EP:	LLU.End_Point_Type;
+    -- Read and process server response
+    Read_Procedure;
 
-	begin -- ChatClient
-  	--Control Input
-   	if ComL.Argument_Count /= 3 then
-    	raise Input_Mismatch;
-   	else
-    	T_IO.Put_Line("1");
-      Server.Machine:= ASU.To_Unbounded_String(ComL.Argument(1));
-      Input_Server_Port:= Integer'Value(ComL.Argument(2));
-      Client.Nick:= ASU.To_Unbounded_String(ComL.Argument(3));
-      T_IO.Put_Line("2");
-	   end if;
-   	T_IO.Put_Line("3");
-	  Server_IP := 
-			ASU.To_Unbounded_String(
-				LLU.To_IP( 
-					ASU.To_String( Server.Machine)));
+    -- If accepted, proceed to the chat loop
+    if Acogido then
+        Write_Procedure;
+    end if;
 
-		-- Construye el End_Point en el que está atado el servidor
-		Server.EP := LLU.Build(ASU.To_String(Server_IP), Input_Server_Port);
-		-- Construye un End_Point libre cualquiera y se ata a él
-   	LLU.Bind_Any(Client.EP);
-   	-- reinicializa el buffer para empezar a utilizarlo
-   	LLU.Reset(Buffer);
-   	T_IO.Put_Line("4");
+    -- Finalize the connection
+    LLU.Finalize;
 
-  	if Client.Nick = Reader then
-    	T_IO.Put_Line("5");
-			--Load Init|Client.EP|Nick into buffer
-      Message:= CM.Init;
-      T_IO.Put_Line("5.2");
-
-      CM.Message_Type'Output(Buffer'Access, Message);
-      T_IO.Put_Line("5.3");
-
-      LLU.End_Point_Type'Output(Buffer'Access, Client.EP);
-      T_IO.Put_Line("5.4");
-
-      ASU.Unbounded_String'Output(Buffer'Access, Client.Nick);
-      T_IO.Put_Line("5.5");
-
-      LLU.Send(Server.EP, Buffer'Access);
-      T_IO.Put_Line("5.1");
-
-      --Proceed to read messages
-      Read(Buffer, Client);
-      T_IO.Put_Line("6");
-
-   	else
-    	--Load Init|Client.EP|Nick into buffer
-      T_IO.Put_Line("7");
-
-      Message := CM.Init;
-   		CM.Message_Type'Output(Buffer'Access, Message);
-   		LLU.End_Point_Type'Output(Buffer'Access, Client.EP);
-     	ASU.Unbounded_String'Output(Buffer'Access, Client.Nick);
-   		LLU.Send(Server.EP, Buffer'Access);
-      T_IO.Put_Line("8");
-
-      -- Proceed to write
-      T_IO.Put_Line("9");
-
-      Write(Buffer,Client,Server);
-   		end if;
-
-		T_IO.Put_Line("10");
-
-   -- terminate Lower_Layer_UDP
-   LLU.Finalize;
-	exception
-   		when Input_Mismatch =>
-      	T_IO.Put_Line("Error: Wrong Call.");
-      	T_IO.Put_Line("Correct format is");
-      	T_IO.Put_Line("... <Machine> <Port> <Client's Nick>");
-      	LLU.Finalize;
-   		when Ex:others =>
-      	Ada.Text_IO.Put_Line (
-						"Excepción imprevista: " &
-            Ada.Exceptions.Exception_Name(Ex) &
-            " en: " &
-            Ada.Exceptions.Exception_Message(Ex));
-      	LLU.Finalize;
-		end Chat_Client;
+exception
+    when Usage_Error =>
+        T_IO.Put_Line("Usage Error: Provide <Server IP> <Port> <Nick>.");
+        LLU.Finalize;
+    when others =>
+        T_IO.Put_Line("Unexpected exception: " & Ada.Exceptions.Exception_Name(others) &
+                      " - " & Ada.Exceptions.Exception_Message(others));
+        LLU.Finalize;
+end Chat_Client;
