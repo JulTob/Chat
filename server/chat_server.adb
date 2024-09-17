@@ -1,136 +1,68 @@
 with Lower_Layer_UDP;
-with Client_Collections;
-with Chat_Messages;
-with Chat_Control;
-
+with Handler_Server;
 with Ada.Strings.Unbounded;
 with Ada.Text_IO;
 with Ada.Exceptions;
 with Ada.Command_Line;
 
-
 procedure Chat_Server is
-   package CC renames Client_Collections ;
+    package LLU renames Lower_Layer_UDP;
+    package ASU renames Ada.Strings.Unbounded;
+    package ATI renames Ada.Text_IO;
+    package ACL renames Ada.Command_Line;
 
-   package LLU renames Lower_Layer_UDP;
-   Use type LLU.End_Point_Type;
+    use type ASU.Unbounded_String;
 
-   package ASU renames Ada.Strings.Unbounded;
-   use type ASU.Unbounded_String;
+    -- Exception for incorrect usage
+    Usage_Error: exception;
 
-   package T_IO renames Ada.Text_IO;
+    -- Variables
+    Maquina: ASU.Unbounded_String;
+    Server_EP: LLU.End_Point_Type;
+    C: Character;
+    Port: Integer;
 
-   package CM renames Chat_Messages ;
-   Use type CM.Message_Type;
-
-   package ComL renames Ada.Command_Line;
-   Input_Mismatch: exception;
-
-   -- Uso de funciones y tipos para chat, compartido Cliente y servidor
-   package Chat renames Chat_Control;
-   Use type Chat.Server_Type;
-   Use type Chat.Client_Type;
-
-   Inform: ASU.Unbounded_String;
-   Server: Chat.Server_Type;
-   Client: Chat.Client_Type;
-   Buffer: aliased LLU.Buffer_Type(1024);
-   Server_IP: ASU.Unbounded_String;
-   Reader: constant ASU.Unbounded_String := ASU.To_Unbounded_String ("reader");
-   Readers_C: CC.Collection_Type;
-   Clients_C: CC.Collection_Type;
-   Comment: ASU.Unbounded_String;
-   Port_Number: Integer;
-   Expired: Boolean;
-   Message : CM.Message_Type;
-   Message_S: constant CM.Message_Type:= CM.Server;
-
-   begin --Chat_Server
-
-      if not(ComL.Argument_Count=1) then
-        raise Input_Mismatch;
-        end if;
- 
-      Port_Number := Natural'Value(ComL.Argument(1));
-      Server.Machine := ASU.To_Unbounded_String(LLU.Get_Host_Name);
-      Server_IP := ASU.To_Unbounded_String(LLU.To_IP(ASU.To_String(Server.Machine)));
-   
-      -- End_Point en una dirección y puerto
-      Server.EP := LLU.Build (ASU.To_String(Server_IP), Port_Number);
-      -- se ata al End_Point para poder recibir en él
-      LLU.Bind (Server.EP);
-      -- bucle infinito
+begin
+    -- Get the server machine's host name and IP
+    Maquina := ASU.To_Unbounded_String(LLU.Get_Host_Name);
     
-      loop
-        -- reinicializa (vacía) el buffer para ahora recibir en él
-        LLU.Reset(Buffer);
-        -- espera 1000.0 segundos a recibir algo dirigido al Server.EP
-        LLU.Receive (Server.EP, Buffer'Access, 1000.0, Expired);
+    -- Check for correct argument count
+    if ACL.Argument_Count /= 2 then
+        raise Usage_Error;
+    else
+        Port := Integer'Value(ACL.Argument(1));
+        Server_EP := LLU.Build(LLU.To_IP(ASU.To_String(Maquina)), Port);
+    end if;
+    
+    -- Bind the server to the endpoint and link it with the handler
+    LLU.Bind(Server_EP, Handler_Server.Server_Handler'Access);
 
-        if Expired then
-          raise Timeout_Exception;
+    -- Main loop: process commands for viewing active or old clients
+    loop
+        -- Get user input
+        ATI.Get_Immediate(C);
+
+        -- Check the user input and act accordingly
+        if C = 'L' or C = 'l' then
+            Handler_Server.Print_Map_Activos(Handler_Server.Clientes_En_Linea);
+        elsif C = 'O' or C = 'o' then
+            Handler_Server.Print_Map_Antiguos(Handler_Server.Clientes_Antiguos);
         else
-          Message := CM.Message_Type'Input(Buffer'Access);
-          case Message is
-              when CM.Init =>
-                Client.EP := LLU.End_Point_Type'Input (Buffer'Access);
-                Client.Nick := ASU.Unbounded_String'Input (Buffer'Access);
-                if Client.Nick = Reader then
-               	    Ada.Text_IO.Put_Line("INIT: Reader logged in.");
-   					        CC.Add_Client (Readers_C, Client.EP, Reader, Unique=>False);
-                else
-                  begin
-               	    CC.Add_Client (Clients_C, Client.EP, Client.Nick, Unique=>True);
-                    T_IO.Put_Line("INIT:" & ASU.To_String(Client.Nick) & "logged in. ");
-                    LLU.Reset (Buffer);
-                    CM.Message_Type'Output(Buffer'Access, Message_S);
-            		    ASU.Unbounded_String'Output (Buffer'Access, Server.Machine);
-                    Inform := ASU.To_Unbounded_String(ASU.To_String(Client.Nick)
-            																			& " joined the chat");
-            		    ASU.Unbounded_String'Output (Buffer'Access, Inform);
+            Ada.Text_IO.Put_Line("Press 'L' or 'l' to view active clients, 'O' or 'o' to view inactive clients.");
+        end if;
+    end loop;
 
-            		    CC.Send_To_All(Readers_C, Buffer'Access);
-                  exception
-                    when CC.Client_Collection_Error =>
-       						  Ada.Text_IO.Put_Line("INIT IGNORED, nick already used");
-                    end;
-                    end if;
-              when CM.Writer =>
-                Client.EP := LLU.End_Point_Type'Input (Buffer'Access);
-                Comment := ASU.Unbounded_String'Input (Buffer'Access);
-                begin
-                  Client.Nick:=CC.Search_Client(Clients_C,Client.EP); --PossibleX
-                  if ASU.To_String(Comment)=".quit" then
-                     CC.Delete_Client(Clients_C,Client.Nick);
-                  else
-                     T_IO.Put(ASU.To_String(Client.Nick) & ": ");
-   					         T_IO.Put_Line(ASU.To_String(Comment));
-                     end if;
-					        LLU.Reset (Buffer);
-     					    CM.Message_Type'Output(Buffer'Access, Message_S);
-   	  				    ASU.Unbounded_String'Output (Buffer'Access, Client.Nick);
-   		  			    ASU.Unbounded_String'Output (Buffer'Access, Comment);
-     					    CC.Send_To_All(Readers_C, Buffer'Access);
-                  exception
-                    when CC.Client_Collection_Error =>
-                       T_IO.Put_Line("WRITER received from unknown client. IGNORED");	;--Exception: triggered by <<PossibleX>>
-                  end;
-              when others => null;--Case is Trivial, but ready for extensions.
-              end case;
-           end if;
-           end loop;
-      exception
-        when Input_Mismatch =>
-          T_IO.Put_Line("Error: Wrong Call.");
-          T_IO.Put_Line("Correct format is");
-          T_IO.Put_Line("... <#Port>");
-          LLU.Finalize;
-        when Timeout_Exception =>
-          Ada.Text_IO.Put_Line ("Timeout. Restart Server to enable communications.");
-          LLU.Finalize;
-        when Ex:others =>
-          Ada.Text_IO.Put_Line ("Excepción imprevista: " &
-                            Ada.Exceptions.Exception_Name(Ex) & " en: " &
-                            Ada.Exceptions.Exception_Message(Ex));
-          LLU.Finalize;
-      end Chat_Server;
+exception
+    -- Handle incorrect command-line arguments
+    when Usage_Error =>
+        ATI.Put_Line("Command Error: Use " & ACL.Command_Name & " <Port Number>");
+        LLU.Finalize;
+
+    -- Handle any other exceptions and finalize the UDP connection
+    when Ex: others =>
+        Ada.Text_IO.Put_Line("Unexpected error: " &
+                             Ada.Exceptions.Exception_Name(Ex) & " - " &
+                             Ada.Exceptions.Exception_Message(Ex));
+        LLU.Finalize;
+
+end Chat_Server;
